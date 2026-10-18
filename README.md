@@ -254,7 +254,7 @@ language: "ru"
 max_questions: 20
 max_file_size_mb: 50
 max_chunk_chars: 6000
-max_steps: 12
+max_steps: 20
 max_tokens_total: 300000
 txt_detect_headings: false
 save_llm_raw: false

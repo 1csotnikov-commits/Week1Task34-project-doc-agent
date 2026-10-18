@@ -43,7 +43,7 @@ class ProjectConfig(BaseModel):
     # Операционные параметры MVP (можно переопределить в docagent.yaml).
     max_file_size_mb: int = Field(default=50, ge=1, le=2048)
     max_chunk_chars: int = Field(default=6000, ge=1000, le=100_000)
-    max_steps: int = Field(default=12, ge=1, le=100)
+    max_steps: int = Field(default=20, ge=1, le=100)
     max_tokens_total: int = Field(default=300_000, ge=1000)
     txt_detect_headings: bool = False
     save_llm_raw: bool = False

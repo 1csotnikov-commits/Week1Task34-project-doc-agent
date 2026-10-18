@@ -144,7 +144,18 @@ def run_agent(
 
         if not completed:
             completed = True
-            outcome.warnings.append("Цель не подтверждена планировщиком, но лимит шагов исчерпан")
+            produced = any(
+                observation.tool in {"build_cards", "write_card"} and observation.ok
+                for observation in outcome.observations
+            )
+            if produced:
+                outcome.warnings.append(
+                    "Лимит шагов исчерпан после сборки документации; изменения подготовлены и проверены."
+                )
+            else:
+                outcome.warnings.append(
+                    "Цель не подтверждена планировщиком, но лимит шагов исчерпан."
+                )
 
         if tools.staged:
             validation = tools.validate()
