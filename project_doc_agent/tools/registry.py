@@ -430,11 +430,11 @@ class ToolLayer:
         if not isinstance(data, dict):
             data = {}
         title = normalize_ws(str(data.get("title") or "")) or self._first_h1(body) or "Карточка проекта"
-        body = self._ensure_card_body(title, body)
-
         raw_type = str(data.get("type") or CardType.integration.value)
         if raw_type not in {item.value for item in CardType}:
             raw_type = CardType.integration.value
+        body = self._ensure_card_body(title, body, raw_type)
+
         raw_id = normalize_ws(str(data.get("id") or ""))
         prefix = f"{self.config.project_id}-"
         if raw_type == CardType.project.value and raw_id == self.config.project_id:
@@ -504,14 +504,25 @@ class ToolLayer:
                 return normalize_ws(line[2:])
         return ""
 
-    def _ensure_card_body(self, title: str, body: str) -> str:
+    def _ensure_card_body(self, title: str, body: str, raw_type: str = "integration") -> str:
         text = body.strip()
         if not text:
             raise ValueError("пустое тело карточки")
         if not self._first_h1(text):
             text = f"# {title}\n\n{text}"
         existing = set(re.findall(r"^##\s+(.+?)\s*$", text, flags=re.MULTILINE))
-        missing = [section for section in standard_sections(self.config.profile.value) if section not in existing]
+        if raw_type == CardType.project.value:
+            required: tuple[str, ...] = (
+                "Назначение",
+                "Клиент и базы",
+                "Состав карточек",
+                "Открытые вопросы",
+                "Источники",
+                "Связанные заметки",
+            )
+        else:
+            required = standard_sections(self.config.profile.value)
+        missing = [section for section in required if section not in existing]
         if missing:
             text = text.rstrip() + "\n\n" + "\n\n".join(f"## {section}\n\n{NO_DATA}" for section in missing)
         return text.strip() + "\n"
