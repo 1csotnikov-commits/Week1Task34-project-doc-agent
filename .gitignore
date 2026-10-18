@@ -1,0 +1,39 @@
+# Секреты и локальная конфигурация
+.env
+.env.*
+!.env.example
+docagent.yaml
+
+# Пользовательские данные и результаты
+output/
+cards/
+reports/
+.docagent/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# IDE / OS
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
+*.log
+
+# Исходные документы клиента не должны попадать в репозиторий
+*.docx
+!tests/fixtures/**/*.docx
+*.pdf
+*.xlsx
+*.pptx

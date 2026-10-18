@@ -1,0 +1,37 @@
+providers:
+  - name: "deepseek"
+    base_url: "https://api.deepseek.com/v1"
+    api_key_env: "DEEPSEEK_API_KEY"
+    model: "deepseek-chat"
+    max_tokens: 8192
+    temperature: 0.1
+    # Цены за 1M токенов, USD. Используются только для оценки стоимости в run.json.
+    input_cost_per_1m: 0.27
+    output_cost_per_1m: 1.10
+    capabilities:
+      json_mode: true
+      tools: false
+
+  - name: "openrouter"
+    base_url: "https://openrouter.ai/api/v1"
+    api_key_env: "OPENROUTER_API_KEY"
+    model: "deepseek/deepseek-chat"
+    max_tokens: 8192
+    temperature: 0.1
+    input_cost_per_1m: 0.27
+    output_cost_per_1m: 1.10
+    capabilities:
+      json_mode: true
+      tools: false
+
+  - name: "mistral"
+    base_url: "https://api.mistral.ai/v1"
+    api_key_env: "MISTRAL_API_KEY"
+    model: "mistral-large-latest"
+    max_tokens: 8192
+    temperature: 0.1
+    input_cost_per_1m: 0.0
+    output_cost_per_1m: 0.0
+    capabilities:
+      json_mode: true
+      tools: false
