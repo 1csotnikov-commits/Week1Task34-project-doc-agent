@@ -49,11 +49,22 @@ DEFAULT_DATA_ROOT = Path(os.environ.get("DOCAGENT_DATA_ROOT", r"C:\DataProject\p
 
 def _safe_console() -> None:
     """Не падать на символах, отсутствующих в кодовой странице консоли Windows."""
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            ctypes.windll.kernel32.SetConsoleOutputCP(65001)
+            ctypes.windll.kernel32.SetConsoleCP(65001)
+        except (AttributeError, OSError):
+            pass
     for name in ("stdout", "stderr"):
         stream = getattr(sys, name, None)
         if stream is not None and hasattr(stream, "reconfigure"):
             try:
-                stream.reconfigure(errors="replace")
+                if stream.isatty():
+                    stream.reconfigure(encoding="utf-8", errors="replace")
+                else:
+                    stream.reconfigure(errors="replace")
             except (AttributeError, OSError, ValueError):
                 pass
 
@@ -418,7 +429,7 @@ def run(
                     "dry_run": dry_run,
                     "interactive": interactive,
                 },
-                prompt_names=("planner.md",),
+                prompt_names=("planner.md", "extract.md"),
             )
         provider_config = load_providers().by_name(selected_provider)
         run.manifest.provider = provider_config.name

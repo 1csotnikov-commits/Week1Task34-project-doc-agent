@@ -248,7 +248,14 @@ class ToolLayer:
     def read_file(self, path: str, max_chars: int = 8000) -> ToolResult:
         resolved = self._resolve_source(path)
         if resolved.suffix.lower() == ".docx":
-            return ToolResult(ok=False, error="Для DOCX используйте read_docx")
+            delegated = self.read_docx(path, max_blocks=200)
+            if not delegated.ok:
+                return delegated
+            return ToolResult(
+                ok=True,
+                output=truncate(delegated.output, max_chars),
+                data=delegated.data,
+            )
         text, encoding = self.workspace.read_text(resolved, max_bytes=self.config.max_file_size_mb * 1024 * 1024)
         relative = resolved.relative_to(self.source_dir).as_posix()
         return ToolResult(
