@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import time
 from collections.abc import Callable
@@ -21,10 +22,12 @@ from project_doc_agent.ingest.docx_parser import parse_docx
 from project_doc_agent.ingest.inventory import build_inventory
 from project_doc_agent.ingest.outline import build_outline
 from project_doc_agent.ingest.parser import ParsedCorpus, parse_corpus
-from project_doc_agent.models import Card, Fact, ToolCallRecord
+from project_doc_agent.models import Card, CardType, Fact, ReviewStatus, SourceRef, ToolCallRecord
 from project_doc_agent.providers.base import LLMProvider
+from project_doc_agent.render.cards import NO_DATA, render_index, render_umbrella
+from project_doc_agent.resources import standard_sections
 from project_doc_agent.runs.manifest import RunContext
-from project_doc_agent.utils import normalize_ws, truncate
+from project_doc_agent.utils import is_slug, normalize_ws, slugify, today_iso, truncate
 from project_doc_agent.validation.cards import split_front_matter
 from project_doc_agent.validation.diff import apply_unified_diff, make_multi_diff
 from project_doc_agent.validation.validator import validate_workspace
@@ -133,7 +136,7 @@ class ToolLayer:
             "outline": ToolSpec("outline", "Оглавление корпуса", OutlineArgs, self.outline),
             "search": ToolSpec("search", "Поиск по источникам", SearchArgs, self.search),
             "extract": ToolSpec("extract", "Извлечение фактов", ExtractArgs, self.extract),
-            "write_card": ToolSpec("write_card", "Запись карточки", WriteCardArgs, self.write_card),
+            "write_card": ToolSpec("write_card", "Подготовить карточку (front matter дополняется автоматически)", WriteCardArgs, self.write_card),
             "write_file": ToolSpec("write_file", "Запись файла", WriteFileArgs, self.write_file),
             "apply_patch": ToolSpec("apply_patch", "Применение patch", ApplyPatchArgs, self.apply_patch),
             "make_diff": ToolSpec("make_diff", "Создание diff", MakeDiffArgs, self.make_diff),
@@ -398,26 +401,187 @@ class ToolLayer:
     def write_card(self, filename: str = "", content: str = "") -> ToolResult:
         if len(content) > 2_000_000:
             return ToolResult(ok=False, error="Карточка слишком большая (>2 МБ)")
-        data, body, error = split_front_matter(content)
-        if error:
-            return ToolResult(ok=False, error=f"Некорректный front matter: {error}")
         try:
-            card = Card.model_validate({**data, "body": body})
-        except ValidationError as exc:
-            return ToolResult(ok=False, error=f"Карточка не прошла схему: {truncate(str(exc), 1500)}")
-        name = filename.strip() or f"{card.id}.md"
-        if not name.endswith(".md"):
-            name += ".md"
-        relative = self._stage_path(f"{self.config.output_dir}/{name}")
-        self.staged[relative] = content
+            card, stem = self._prepare_card(content, filename)
+        except ValueError as exc:
+            return ToolResult(ok=False, error=f"Карточка не подготовлена: {exc}")
+        relative = self._stage_path(f"{self.config.output_dir}/{stem}.md")
+        self.staged[relative] = card.to_markdown()
+        derived = self._refresh_derived_cards()
+        message = f"Карточка подготовлена: {relative}"
+        if derived:
+            message += f"; обновлены: {', '.join(derived)}"
+        if self.dry_run:
+            message += " (dry-run, не записана)"
         return ToolResult(
             ok=True,
-            output=(
-                f"Карточка подготовлена: {relative}"
-                + (" (dry-run, не записана)" if self.dry_run else "")
-            ),
-            data={"path": relative, "id": card.id},
+            output=message,
+            data={"path": relative, "id": card.id, "derived": derived},
         )
+
+    def _prepare_card(self, content: str, filename: str) -> tuple[Card, str]:
+        stripped = content.lstrip("\ufeff")
+        if stripped.startswith("---"):
+            data, body, error = split_front_matter(content)
+            if error:
+                raise ValueError(f"некорректный front matter: {error}")
+        else:
+            data, body = {}, content
+        if not isinstance(data, dict):
+            data = {}
+        title = normalize_ws(str(data.get("title") or "")) or self._first_h1(body) or "Карточка проекта"
+        body = self._ensure_card_body(title, body)
+
+        raw_type = str(data.get("type") or CardType.integration.value)
+        if raw_type not in {item.value for item in CardType}:
+            raw_type = CardType.integration.value
+        raw_id = normalize_ws(str(data.get("id") or ""))
+        prefix = f"{self.config.project_id}-"
+        if raw_type == CardType.project.value and raw_id == self.config.project_id:
+            card_id = raw_id
+        elif is_slug(raw_id) and raw_id.startswith(prefix):
+            card_id = raw_id
+        else:
+            card_id = f"{prefix}{slugify(title, fallback='card', max_length=50)}"
+
+        sources = self._card_sources(data.get("sources"))
+        if not sources:
+            raise ValueError("не удалось определить источники карточки")
+        review_status = str(data.get("review_status") or "")
+        if review_status not in {item.value for item in ReviewStatus}:
+            review_status = ReviewStatus.needs_review.value
+        review_note = normalize_ws(str(data.get("review_note") or ""))
+        if review_status != ReviewStatus.ok.value and not review_note:
+            review_note = "Карточка подготовлена агентом и требует проверки."
+        raw_tags: list[str] = (
+            [item for item in data.get("tags", []) if isinstance(item, str)]
+            if isinstance(data.get("tags"), list)
+            else []
+        )
+        tags: list[str] = []
+        for tag in [*raw_tags, f"клиент/{self.config.client}", f"проект/{self.config.project}", "агент"]:
+            if isinstance(tag, str) and normalize_ws(tag) and normalize_ws(tag) not in tags:
+                tags.append(normalize_ws(tag))
+        risk = str(data.get("risk") or "medium")
+        if risk not in {"low", "medium", "high"}:
+            risk = "medium"
+        created = str(data.get("created") or today_iso())
+        updated = str(data.get("updated") or today_iso())
+        try:
+            card = Card.model_validate(
+                {
+                    "id": card_id,
+                    "client": self.config.client,
+                    "client_name": self.config.client_name,
+                    "project": self.config.project,
+                    "project_name": self.config.project_name,
+                    "bases": list(self.config.bases),
+                    "title": title,
+                    "type": raw_type,
+                    "profile": self.config.profile.value,
+                    "status": str(data.get("status") or "draft"),
+                    "risk": risk,
+                    "sources": [source.model_dump() for source in sources],
+                    "review_status": review_status,
+                    "review_note": review_note or None,
+                    "tags": tags,
+                    "created": created,
+                    "updated": updated,
+                    "parent": None if raw_type == CardType.project.value else self.config.project_id,
+                    "body": body,
+                }
+            )
+        except ValidationError as exc:
+            raise ValueError(f"схема Card: {truncate(str(exc), 1200)}") from exc
+        raw_name = Path(filename.strip()).name if filename.strip() else ""
+        stem = slugify(Path(raw_name).stem, fallback=card.id, max_length=80) if raw_name else card.id
+        return card, stem
+
+
+    def _first_h1(self, body: str) -> str:
+        for line in body.splitlines():
+            if line.startswith("# ") and not line.startswith("## "):
+                return normalize_ws(line[2:])
+        return ""
+
+    def _ensure_card_body(self, title: str, body: str) -> str:
+        text = body.strip()
+        if not text:
+            raise ValueError("пустое тело карточки")
+        if not self._first_h1(text):
+            text = f"# {title}\n\n{text}"
+        existing = set(re.findall(r"^##\s+(.+?)\s*$", text, flags=re.MULTILINE))
+        missing = [section for section in standard_sections(self.config.profile.value) if section not in existing]
+        if missing:
+            text = text.rstrip() + "\n\n" + "\n\n".join(f"## {section}\n\n{NO_DATA}" for section in missing)
+        return text.strip() + "\n"
+
+    def _card_sources(self, raw_sources: Any) -> list[SourceRef]:
+        refs: list[SourceRef] = []
+        if isinstance(raw_sources, list):
+            for item in raw_sources:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    ref = SourceRef.model_validate(item)
+                except ValidationError:
+                    continue
+                if ref.file and ref.block_id:
+                    refs.append(ref)
+        if not refs:
+            for fact in self.facts:
+                refs.extend(fact.source_refs)
+        if not refs:
+            corpus = self._load_corpus()
+            for document in corpus.documents:
+                blocks = [block for block in corpus.blocks if block.document_id == document.document_id]
+                block = next((item for item in blocks if item.kind not in {"heading", "image"}), None)
+                if block is None and blocks:
+                    block = blocks[0]
+                if block is not None:
+                    refs.append(
+                        SourceRef(
+                            file=document.file,
+                            section=block.section,
+                            block_id=block.block_id,
+                            sha256=document.sha256,
+                        )
+                    )
+        unique: list[SourceRef] = []
+        seen: set[str] = set()
+        for ref in refs:
+            key = f"{ref.file}|{ref.section}"
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(ref)
+        return unique[:100]
+
+
+
+    def _refresh_derived_cards(self) -> list[str]:
+        cards: list[Card] = []
+        prefix = f"{self.config.output_dir}/"
+        umbrella_path = f"{self.config.output_dir}/{self.config.project_id}.md"
+        for relative, text in list(self.staged.items()):
+            if not relative.startswith(prefix) or relative.endswith("/index.md") or relative == umbrella_path:
+                continue
+            data, body, error = split_front_matter(text)
+            if error:
+                continue
+            try:
+                cards.append(Card.model_validate({**data, "body": body}))
+            except ValidationError:
+                continue
+        if not cards or any(card.type is CardType.project for card in cards):
+            return []
+        umbrella = render_umbrella(self.config, cards, [])
+        index = render_index(self.config, cards)
+        index_path = f"{self.config.output_dir}/index.md"
+        self.staged[umbrella_path] = umbrella.to_markdown()
+        self.staged[index_path] = index
+        return [umbrella_path, index_path]
+
 
     def write_file(self, path: str, content: str = "") -> ToolResult:
         if len(content) > 2_000_000:

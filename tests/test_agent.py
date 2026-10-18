@@ -81,7 +81,53 @@ def test_agent_dry_run_does_not_write(workspace: tuple[Workspace, ProjectConfig]
     assert (run.run_dir / "staged" / "cards" / "marta-toplog-rc-demo.md").is_file()
 
 
+def test_write_card_fills_metadata_and_creates_umbrella(workspace: tuple[Workspace, ProjectConfig]) -> None:
+    ws, config = workspace
+    run = RunContext.create(ws, "test-autofill")
+    tools = _tool_layer(ws, config, run)
+    content = """---
+title: "Интеграция TopLog WMS и РЦ"
+project: "Интеграция TopLog WMS и РЦ"
+---
+
+# Интеграция
+
+Краткое описание без обязательных разделов.
+"""
+    result = tools.execute(
+        "write_card",
+        {"filename": "integration.md", "content": content},
+    )
+    assert result.ok, result.error
+    assert "cards/integration.md" in tools.staged
+    assert "cards/marta-toplog-rc.md" in tools.staged
+    assert "cards/index.md" in tools.staged
+    card_text = tools.staged["cards/integration.md"]
+    assert "project: toplog-rc" in card_text
+    assert "project_name:" in card_text
+    assert "sources:" in card_text
+    assert "## Назначение" in card_text
+    assert "review_status: needs_review" in card_text
+    validation = tools.validate()
+    assert validation.ok, validation.output
+
+
+def test_write_card_accepts_plain_markdown(workspace: tuple[Workspace, ProjectConfig]) -> None:
+    ws, config = workspace
+    run = RunContext.create(ws, "test-plain-card")
+    tools = _tool_layer(ws, config, run)
+    result = tools.execute(
+        "write_card",
+        {"filename": "plain.md", "content": "# Простая карточка\n\nТекст без front matter."},
+    )
+    assert result.ok, result.error
+    card_text = tools.staged["cards/plain.md"]
+    assert card_text.startswith("---\n")
+    assert "id: marta-toplog-rc-prostaya-kartochka" in card_text
+    assert "## Источники" in card_text
+
 def test_agent_unknown_tool_fails_without_writes(workspace: tuple[Workspace, ProjectConfig]) -> None:
+
     ws, config = workspace
     run = RunContext.create(ws, "test-run-bad", goal="Сломай план")
     with pytest.raises(PlanError):
