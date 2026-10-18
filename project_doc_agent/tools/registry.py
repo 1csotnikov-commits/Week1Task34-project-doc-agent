@@ -16,15 +16,22 @@ from pydantic import BaseModel, Field, ValidationError
 from project_doc_agent.config import ProjectConfig
 from project_doc_agent.errors import PlanError, WorkspaceError
 from project_doc_agent.extract.facts import extract_all
+from project_doc_agent.extract.grouping import group_facts
 from project_doc_agent.index.fts import SearchIndex, SearchRecord
 from project_doc_agent.ingest.chunking import chunk_document
 from project_doc_agent.ingest.docx_parser import parse_docx
 from project_doc_agent.ingest.inventory import build_inventory
 from project_doc_agent.ingest.outline import build_outline
 from project_doc_agent.ingest.parser import ParsedCorpus, parse_corpus
-from project_doc_agent.models import Card, CardType, Fact, ReviewStatus, SourceRef, ToolCallRecord
+from project_doc_agent.models import Card, CardType, Fact, ManualReviewItem, ReviewStatus, SourceRef, ToolCallRecord
 from project_doc_agent.providers.base import LLMProvider
-from project_doc_agent.render.cards import NO_DATA, render_index, render_umbrella
+from project_doc_agent.render.cards import NO_DATA, render_all, render_index, render_umbrella
+from project_doc_agent.render.reports import (
+    render_conflicts,
+    render_manual_review,
+    render_open_questions,
+    render_sources,
+)
 from project_doc_agent.resources import standard_sections
 from project_doc_agent.runs.manifest import RunContext
 from project_doc_agent.utils import is_slug, normalize_ws, slugify, today_iso, truncate
@@ -60,6 +67,10 @@ class SearchArgs(BaseModel):
 
 class ExtractArgs(BaseModel):
     force: bool = False
+
+
+class BuildCardsArgs(BaseModel):
+    pass
 
 
 class WriteCardArgs(BaseModel):
@@ -125,6 +136,8 @@ class ToolLayer:
         self.dry_run = dry_run
         self.staged: dict[str, str] = {}
         self.facts: list[Fact] = []
+        self.extraction_warnings: list[str] = []
+        self.extraction_manual_review: list[ManualReviewItem] = []
         self._corpus: ParsedCorpus | None = None
         self._specs = self._build_specs()
 
@@ -136,6 +149,7 @@ class ToolLayer:
             "outline": ToolSpec("outline", "Оглавление корпуса", OutlineArgs, self.outline),
             "search": ToolSpec("search", "Поиск по источникам", SearchArgs, self.search),
             "extract": ToolSpec("extract", "Извлечение фактов", ExtractArgs, self.extract),
+            "build_cards": ToolSpec("build_cards", "Собрать полный набор карточек и отчётов из фактов", BuildCardsArgs, self.build_cards),
             "write_card": ToolSpec("write_card", "Подготовить карточку (front matter дополняется автоматически)", WriteCardArgs, self.write_card),
             "write_file": ToolSpec("write_file", "Запись файла", WriteFileArgs, self.write_file),
             "apply_patch": ToolSpec("apply_patch", "Применение patch", ApplyPatchArgs, self.apply_patch),
@@ -387,6 +401,8 @@ class ToolLayer:
             goal="",
         )
         self.facts = extraction.facts
+        self.extraction_warnings = list(extraction.warnings)
+        self.extraction_manual_review = list(extraction.manual_review)
         self.run.write_json(
             "tool_facts.json",
             [fact.model_dump(mode="json") for fact in self.facts],
@@ -397,6 +413,66 @@ class ToolLayer:
             error="; ".join(extraction.warnings[-3:]) if extraction.skipped_chunks else None,
             data={"facts": len(self.facts), "skipped_chunks": len(extraction.skipped_chunks)},
         )
+
+    def build_cards(self) -> ToolResult:
+        if not self.facts:
+            return ToolResult(ok=False, error="Сначала выполните extract: факты ещё не извлечены")
+        grouped = group_facts(self.facts, self.config)
+        if not grouped.cards:
+            return ToolResult(ok=False, error="Не удалось сгруппировать факты в карточки")
+        corpus = self._load_corpus()
+        rendered = render_all(
+            grouped.cards,
+            self.config,
+            grouped.questions,
+            created_map=self._existing_created(),
+            updated=today_iso(),
+        )
+        staged = dict(rendered.files)
+        warnings = [*corpus.warnings, *self.extraction_warnings, *grouped.warnings]
+        manual_items = [*corpus.manual_review, *self.extraction_manual_review]
+        staged[f"{self.config.reports_dir}/sources.md"] = render_sources(rendered.cards, corpus.documents)
+        staged[f"{self.config.reports_dir}/open_questions.md"] = render_open_questions(
+            grouped.questions, self.config
+        )
+        staged[f"{self.config.reports_dir}/conflicts.md"] = render_conflicts(grouped.conflicts)
+        staged[f"{self.config.reports_dir}/manual_review.md"] = render_manual_review(manual_items, warnings)
+        prefix = f"{self.config.output_dir}/"
+        for relative in list(self.staged):
+            if relative.startswith(prefix) and relative.endswith(".md") and relative not in staged:
+                del self.staged[relative]
+        self.staged.update(staged)
+        return ToolResult(
+            ok=True,
+            output=(
+                f"Подготовлено карточек: {len(rendered.cards)}; "
+                f"файлов: {len(staged)}; конфликтов: {len(grouped.conflicts)}"
+            ),
+            data={
+                "cards": len(rendered.cards),
+                "files": len(staged),
+                "conflicts": len(grouped.conflicts),
+                "questions": len(grouped.questions),
+            },
+        )
+
+    def _existing_created(self) -> dict[str, str]:
+        created: dict[str, str] = {}
+        for path in self.workspace.card_files():
+            if path.name == "index.md":
+                continue
+            try:
+                raw = path.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            data, _, error = split_front_matter(raw)
+            if error:
+                continue
+            card_id = data.get("id")
+            created_value = data.get("created")
+            if isinstance(card_id, str) and isinstance(created_value, str):
+                created[card_id] = created_value
+        return created
 
     def write_card(self, filename: str = "", content: str = "") -> ToolResult:
         if len(content) > 2_000_000:

@@ -15,6 +15,7 @@ from project_doc_agent.models import Fact, OpenQuestion, RunStatus
 from project_doc_agent.providers.base import LLMProvider
 from project_doc_agent.runs.manifest import RunContext
 from project_doc_agent.tools.registry import ToolLayer
+from project_doc_agent.validation.validator import validate_workspace
 from project_doc_agent.workspace import Workspace
 
 
@@ -163,6 +164,15 @@ def run_agent(
                 for path in written:
                     run.record_output(path)
                     outcome.written_files.append(workspace.relative(path))
+                try:
+                    final_validation = validate_workspace(workspace, config, apply=False, run=run)
+                    if final_validation.errors:
+                        outcome.warnings.append(
+                            f"Валидация после записи: ошибок {len(final_validation.errors)}; "
+                            "см. reports/validation.md"
+                        )
+                except Exception as exc:  # noqa: BLE001 - отчёт не должен ломать прогон
+                    outcome.warnings.append(f"Не удалось сформировать reports/validation.md: {exc}")
 
         questions = _fact_questions(tools.facts, config)
         answers = _ask_questions(questions, ask if interactive else None, config.max_questions)

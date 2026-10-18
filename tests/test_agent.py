@@ -126,6 +126,28 @@ def test_write_card_accepts_plain_markdown(workspace: tuple[Workspace, ProjectCo
     assert "id: marta-toplog-rc-prostaya-kartochka" in card_text
     assert "## Источники" in card_text
 
+def test_build_cards_creates_full_set(workspace: tuple[Workspace, ProjectConfig]) -> None:
+    ws, config = workspace
+    run = RunContext.create(ws, "test-build-cards")
+    tools = _tool_layer(ws, config, run)
+    extraction = tools.execute("extract", {})
+    assert extraction.ok, extraction.error
+    build = tools.execute("build_cards", {})
+    assert build.ok, build.error
+    assert int(build.data.get("cards", 0)) >= 3
+    for name in (
+        "cards/marta-toplog-rc.md",
+        "cards/index.md",
+        "reports/sources.md",
+        "reports/open_questions.md",
+        "reports/conflicts.md",
+        "reports/manual_review.md",
+    ):
+        assert name in tools.staged, name
+    validation = tools.validate()
+    assert validation.ok, validation.output
+
+
 def test_agent_unknown_tool_fails_without_writes(workspace: tuple[Workspace, ProjectConfig]) -> None:
 
     ws, config = workspace
