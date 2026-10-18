@@ -381,7 +381,7 @@ class ToolLayer:
             provider=self.provider,
             run=self.run,
             config=self.config,
-            goal=self.run.manifest.goal or "",
+            goal="",
         )
         self.facts = extraction.facts
         self.run.write_json(
